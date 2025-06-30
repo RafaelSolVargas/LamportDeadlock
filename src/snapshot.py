@@ -1,11 +1,13 @@
 import threading
 import time
+
 from src.utils import log
+from src.visualization import visualize_wait_for_graph
+
 
 class DeadlockDetector:
     def __init__(self, shutdown_event):
         self.shutdown_event = shutdown_event
-
 
     def analyze(self, snapshot):
         if self.shutdown_event.is_set():
@@ -15,15 +17,17 @@ class DeadlockDetector:
         graph = self.__build_wait_for_graph(snapshot)
         if any(graph.values()):
             log(f"Built Wait-For Graph: {graph}")
-        
+            visualize_wait_for_graph(graph)  # Visualize the graph
+
         cycle = self.__find_cycle(graph)
-        
+
         if cycle:
-            log("="*40)
-            log("!!! DEADLOCK DETECTED !!!")
-            log(f"Dependency cycle found: {' -> '.join(cycle)}")
+            log("=" * 40)
+            log("\033[91m!!! DEADLOCK DETECTED !!!\033[0m")
+            log(f"\033[91mDependency cycle found: {' -> '.join(cycle)}\033[0m")
+            visualize_wait_for_graph(graph, cycle=cycle)
             log("Initiating graceful shutdown of the application...")
-            log("="*40)
+            log("=" * 40)
             self.shutdown_event.set()
         else:
             log("No deadlocks were detected in this snapshot.")
@@ -31,11 +35,13 @@ class DeadlockDetector:
     def __build_wait_for_graph(self, snapshot):
         graph = {thread_id: [] for thread_id in snapshot}
         for thread_id, state in snapshot.items():
-            waiting_for_table_name = state['waiting_for_table']
+            waiting_for_table_name = state["waiting_for_table"]
             if waiting_for_table_name:
                 owner_found = None
                 for other_thread_id, other_state in snapshot.items():
-                    if waiting_for_table_name in [t.name for t in other_state['locked_tables']]:
+                    if waiting_for_table_name in [
+                        t.name for t in other_state["locked_tables"]
+                    ]:
                         owner_found = other_thread_id
                         break
                 if owner_found and owner_found != thread_id:
@@ -58,20 +64,25 @@ class DeadlockDetector:
         return None
 
     def __dfs_cycle_util(self, node, graph, visited, recursion_stack, path=None):
-        if path is None: path = []
+        if path is None:
+            path = []
         visited.add(node)
         recursion_stack.add(node)
         path.append(node)
         for neighbor in graph.get(node, []):
             if neighbor not in visited:
-                result = self.__dfs_cycle_util(neighbor, graph, visited, recursion_stack, path)
-                if result: return result
+                result = self.__dfs_cycle_util(
+                    neighbor, graph, visited, recursion_stack, path
+                )
+                if result:
+                    return result
             elif neighbor in recursion_stack:
                 path.append(neighbor)
                 return path
         recursion_stack.remove(node)
         path.pop()
         return None
+
 
 class Snapshotter(threading.Thread):
     def __init__(self, lock_manager, interval, shutdown_event):

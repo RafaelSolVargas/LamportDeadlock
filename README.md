@@ -1,3 +1,9 @@
+# Grupo
+
+- Caio Prá Silva (21203773)
+- Pedro Nack Martins (21200081)
+- Rafael Luis Sol Veit Vargas (21100138) 
+
 # Simulação de Detecção de Deadlock com Snapshot Distribuído - INE5418
 
 Este projeto é uma simulação em Python que demonstra a detecção de *deadlocks* (impasses) em um ambiente concorrente, modelado como um Sistema de Gerenciamento de Banco de Dados (SGBD) simplificado.

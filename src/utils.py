@@ -1,22 +1,46 @@
-import time
-import threading
-import os
+import logging
+from collections import defaultdict
 
-LOG_FILE = "/home/caio/8o-semestre-UFSC/INE5418-Comp-Distribuida/LamportDeadlock/logs.txt"
+class ColoredFormatter(logging.Formatter):
+    """A custom formatter to add colors to log messages."""
 
-# Clear the log file at the start of execution
-if os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "w") as log_file:
-        log_file.write("")  # Clear the file
+    COLORS = {
+        "DEBUG": "\033[94m",  # Blue
+        "INFO": "\033[92m",  # Green
+        "WARNING": "\033[93m",  # Yellow
+        "ERROR": "\033[91m",  # Red
+        "CRITICAL": "\033[91m",  # Red
+        "RESET": "\033[0m",  # Reset
+    }
+    THREAD_COLORS = [
+        "\033[96m",  # Cyan
+        "\033[95m",  # Magenta
+        "\033[94m",  # Blue
+        "\033[93m",  # Yellow
+        "\033[92m",  # Green
+        "\033[91m",  # Red
+    ]
 
-def log(message):
-    """Log function to print messages with a timestamp and the current thread's name."""
-    timestamp = time.strftime('%H:%M:%S', time.localtime())
-    formatted_message = f"[{timestamp}] [{threading.current_thread().name}] {message}"
-    
-    # Print to console
-    print(formatted_message)    
-    
-    # Append to log file
-    with open(LOG_FILE, "a") as log_file:
-        log_file.write(formatted_message + "\n")
+    def __init__(self, fmt):
+        super().__init__(fmt)
+        self.thread_color_map = {}
+
+    def format(self, record):
+        thread_name = record.threadName
+        if thread_name not in self.thread_color_map:
+            color_index = len(self.thread_color_map) % len(self.THREAD_COLORS)
+            self.thread_color_map[thread_name] = self.THREAD_COLORS[color_index]
+
+        thread_color = self.thread_color_map[thread_name]
+        record.threadName = f"{thread_color}{thread_name}{self.COLORS['RESET']}"
+
+        log_message = super().format(record)
+        return f"{self.COLORS.get(record.levelname, self.COLORS['RESET'])}{log_message}{self.COLORS['RESET']}"
+
+def setup_logging():
+    """Configures logging with the custom formatter."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(ColoredFormatter("%(asctime)s - %(threadName)s - %(message)s"))
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.handlers = [handler]

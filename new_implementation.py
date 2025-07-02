@@ -3,15 +3,56 @@ import time
 import random
 import logging
 from collections import defaultdict
-
-# Configure logging for clear output
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(threadName)s - %(message)s",
-    datefmt="%H:%M:%S",
-)
+import queue
 
 
+# --- Enhanced Logging Setup ---
+class ColoredFormatter(logging.Formatter):
+    """A custom formatter to add colors to log messages."""
+
+    COLORS = {
+        "DEBUG": "\033[94m",  # Blue
+        "INFO": "\033[92m",  # Green
+        "WARNING": "\033[93m",  # Yellow
+        "ERROR": "\033[91m",  # Red
+        "CRITICAL": "\033[91m",  # Red
+        "RESET": "\033[0m",  # Reset
+    }
+    THREAD_COLORS = [
+        "\033[96m",  # Cyan
+        "\033[95m",  # Magenta
+        "\033[94m",  # Blue
+        "\033[93m",  # Yellow
+        "\033[92m",  # Green
+        "\033[91m",  # Red
+    ]
+
+    def __init__(self, fmt):
+        super().__init__(fmt)
+        self.thread_color_map = {}
+
+    def format(self, record):
+        thread_name = record.threadName
+        if thread_name not in self.thread_color_map:
+            color_index = len(self.thread_color_map) % len(self.THREAD_COLORS)
+            self.thread_color_map[thread_name] = self.THREAD_COLORS[color_index]
+
+        thread_color = self.thread_color_map[thread_name]
+        record.threadName = f"{thread_color}{thread_name}{self.COLORS['RESET']}"
+
+        log_message = super().format(record)
+        return f"{self.COLORS.get(record.levelname, self.COLORS['RESET'])}{log_message}{self.COLORS['RESET']}"
+
+
+# Configure logging with the custom formatter
+handler = logging.StreamHandler()
+handler.setFormatter(ColoredFormatter("%(asctime)s - %(threadName)s - %(message)s"))
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.handlers = [handler]
+
+
+# --- Simulation Classes ---
 class Table:
     """Represents a table in the database that can be locked by a user."""
 
@@ -33,8 +74,11 @@ class User(threading.Thread):
         self.tables = tables
         self.all_users = all_users
         self.held_locks = []
-        self.waiting_for = None  # This now represents a persistent goal
+        self.waiting_for = None
         self.running = True
+
+        # Message queue for receiving markers
+        self.in_channel = queue.Queue()
 
         # Snapshot state
         self.local_state = {}
@@ -45,114 +89,111 @@ class User(threading.Thread):
     def run(self):
         """Main loop for the user thread."""
         while self.running:
+            self.process_messages()
             self.perform_action()
             time.sleep(random.uniform(0.5, 1.5))
-        logging.info(f"{self.name} gracefully shutting down.")
+        logger.info(f"Gracefully shutting down.")
+
+    def process_messages(self):
+        """Processes incoming messages from the channel."""
+        try:
+            while not self.in_channel.empty():
+                message = self.in_channel.get_nowait()
+                if message["type"] == "MARKER":
+                    self.receive_marker(message["from_user"], message["snapshot_id"])
+        except queue.Empty:
+            pass  # No messages to process
 
     def perform_action(self):
         """Decides what action to take based on the current state."""
         if not self.running:
             return
 
-        # If we are already waiting for a table, our only action is to keep trying to acquire it.
         if self.waiting_for:
-            logging.info(f"Continuing to wait for {self.waiting_for}")
+            logger.info(f"Continuing to wait for {self.waiting_for}")
             self.try_acquire_lock(self.waiting_for)
             return
 
-        # If not waiting for anything, choose a new action.
         action = random.choice(["read", "write"])
         table = random.choice(self.tables)
 
         if action == "read":
             self.read(table)
         elif action == "write":
-            # Set the intention to acquire this lock as a persistent goal.
             self.waiting_for = table
-            logging.info(f"New goal: WRITE to {table}")
+            logger.info(f"New goal: WRITE to {table}")
             self.try_acquire_lock(table)
 
     def read(self, table):
-        """Performs a read operation on a table."""
-        logging.info(f"Attempting to READ from {table}")
-        logging.info(f"Successfully READ from {table}")
+        logger.info(f"Attempting to READ from {table}")
+        logger.info(f"Successfully READ from {table}")
 
     def try_acquire_lock(self, table):
-        """Attempts to acquire a lock for a write operation."""
         if table in self.held_locks:
-            logging.info(f"Already holds lock for {table}. Goal achieved.")
-            self.waiting_for = None  # Clear the goal
+            logger.info(f"Already holds lock for {table}. Goal achieved.")
+            self.waiting_for = None
             return
 
-        # Use a timeout on the lock acquire.
         lock_acquired = table.lock.acquire(blocking=True, timeout=1)
 
         if lock_acquired:
-            # Check if the thread was stopped while waiting for the lock
             if not self.running:
                 table.lock.release()
                 self.waiting_for = None
                 return
-
-            logging.info(f"Acquired lock on {table}. Writing.")
+            logger.info(f"Acquired lock on {table}. Writing.")
             self.held_locks.append(table)
             table.locked_by = self
-            # Goal achieved, clear the waiting state.
             self.waiting_for = None
         else:
-            logging.warning(f"Could not acquire lock for {table}, will keep trying.")
-            # IMPORTANT: We do NOT clear self.waiting_for here.
-            # The user will retry in the next perform_action call.
-
-    def release_lock(self, table):
-        """Releases a lock held by the user."""
-        if table in self.held_locks:
-            table.lock.release()
-            table.locked_by = None
-            self.held_locks.remove(table)
-            logging.info(f"Released lock on {table}")
+            logger.warning(f"Could not acquire lock for {table}, will keep trying.")
 
     def stop(self):
-        """Signals the user thread to stop."""
-        logging.info("Stop signal received.")
+        logger.info("Stop signal received.")
         self.running = False
 
     def initiate_snapshot(self, snapshot_id):
-        """Initiates the Chandy-Lamport snapshot algorithm."""
+        """Initiates the snapshot by recording its state and sending markers."""
         with self.snapshot_lock:
             if not self.received_marker[snapshot_id]:
-                logging.info(f"Initiating snapshot {snapshot_id}")
+                logger.info(f"Initiating snapshot {snapshot_id}")
                 self.record_local_state(snapshot_id)
                 self.received_marker[snapshot_id] = True
                 for user in self.all_users:
                     if user.id != self.id:
-                        logging.info(
-                            f"Sending marker for snapshot {snapshot_id} to User-{user.id}"
-                        )
-                        user.receive_marker(self, snapshot_id)
+                        marker_message = {
+                            "type": "MARKER",
+                            "from_user": self.id,
+                            "snapshot_id": snapshot_id,
+                        }
+                        logger.info(f"  -> Sending marker to User-{user.id}")
+                        user.in_channel.put(marker_message)
 
-    def receive_marker(self, from_user, snapshot_id):
+    def receive_marker(self, from_user_id, snapshot_id):
         """Handles receiving a snapshot marker from another user."""
         with self.snapshot_lock:
             if not self.received_marker[snapshot_id]:
-                logging.info(
-                    f"Received marker for snapshot {snapshot_id} from {from_user.name}"
+                logger.info(
+                    f"Received first marker for snapshot {snapshot_id} from User-{from_user_id}"
                 )
                 self.record_local_state(snapshot_id)
                 self.received_marker[snapshot_id] = True
+                # Forward the marker to all other users
                 for user in self.all_users:
                     if user.id != self.id:
-                        logging.info(
-                            f"Forwarding marker for snapshot {snapshot_id} to User-{user.id}"
-                        )
-                        user.receive_marker(self, snapshot_id)
+                        marker_message = {
+                            "type": "MARKER",
+                            "from_user": self.id,
+                            "snapshot_id": snapshot_id,
+                        }
+                        logger.info(f"  -> Forwarding marker to User-{user.id}")
+                        user.in_channel.put(marker_message)
             else:
-                logging.info(
-                    f"Received subsequent marker for snapshot {snapshot_id} from {from_user.name}. Recording channel state."
+                logger.info(
+                    f"Received subsequent marker for snapshot {snapshot_id} from User-{from_user_id}. Recording channel state."
                 )
 
     def record_local_state(self, snapshot_id):
-        """Records the user's current state for a snapshot."""
         state = {
             "held_locks": [table.id for table in self.held_locks],
             "waiting_for": self.waiting_for.id
@@ -160,67 +201,72 @@ class User(threading.Thread):
             else None,
         }
         self.local_state[snapshot_id] = state
-        logging.info(f"Recorded local state for snapshot {snapshot_id}: {state}")
+        logger.info(f"  [State Recorded for Snapshot {snapshot_id}: {state}]")
 
 
 class DeadlockDetector(threading.Thread):
     """Manages the simulation, initiates snapshots, and detects deadlocks."""
 
     def __init__(self, users, tables):
-        super().__init__(name="Deadlock-Detector")
+        super().__init__(name="Detector")
         self.users = users
         self.tables = tables
         self.snapshot_id_counter = 0
         self.running = True
 
     def run(self):
-        """Periodically initiates snapshots and checks for deadlocks."""
         while self.running:
             time.sleep(10)
             if not self.running:
                 break
+            self.run_snapshot_and_detection()
 
-            self.snapshot_id_counter += 1
-            snapshot_id = self.snapshot_id_counter
-            logging.info(f"--- Starting Global Snapshot {snapshot_id} ---")
+    def run_snapshot_and_detection(self):
+        self.snapshot_id_counter += 1
+        snapshot_id = self.snapshot_id_counter
+        header = f"--- Starting Global Snapshot {snapshot_id} ---"
+        logger.info("\n" + "=" * len(header) + f"\n{header}\n" + "=" * len(header))
 
-            initiator = self.users[0]
-            initiator.initiate_snapshot(snapshot_id)
+        initiator = self.users[0]
+        initiator.initiate_snapshot(snapshot_id)
 
-            time.sleep(2)  # Allow time for markers to propagate
+        time.sleep(3)  # Allow time for markers to propagate via queues
 
-            global_state = self.collect_global_state(snapshot_id)
-            logging.info(f"--- Global State for Snapshot {snapshot_id} ---")
-            for user_id, state in sorted(global_state.items()):
-                logging.info(f"User-{user_id}: {state}")
+        global_state = self.collect_global_state(snapshot_id)
+        logger.info("--- Global State Collected ---")
+        for user_id, state in sorted(global_state.items()):
+            logger.info(f"  User-{user_id}: {state}")
 
-            wait_for_graph = self.build_wait_for_graph(global_state)
-            logging.info(f"Wait-For Graph: {dict(wait_for_graph)}")
+        wait_for_graph = self.build_wait_for_graph(global_state)
+        logger.info("--- Wait-For Graph ---")
+        if not wait_for_graph:
+            logger.info("  (Empty)")
+        else:
+            for node, edges in sorted(wait_for_graph.items()):
+                logger.info(f"  User-{node} is waiting for User(s): {edges}")
 
-            if self.detect_cycle(wait_for_graph):
-                logging.error("!!! DEADLOCK DETECTED! Terminating simulation. !!!")
-                self.stop_simulation()
-            else:
-                logging.info("--- No deadlock detected in snapshot. ---")
+        if self.detect_cycle(wait_for_graph):
+            logger.error(
+                "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n!!! DEADLOCK DETECTED! !!!\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            )
+            self.stop_simulation()
+        else:
+            logger.info("--- No deadlock detected. ---\n")
 
     def stop_simulation(self):
-        """Stops all threads in the simulation."""
         self.running = False
         for user in self.users:
             user.stop()
 
     def collect_global_state(self, snapshot_id):
-        """Collects the local states from all users for a given snapshot."""
         global_state = {}
         for user in self.users:
-            # We need a lock here to prevent reading state while it's being written
             with user.snapshot_lock:
                 if snapshot_id in user.local_state:
                     global_state[user.id] = user.local_state[snapshot_id]
         return global_state
 
     def build_wait_for_graph(self, global_state):
-        """Builds a wait-for graph from the collected global state."""
         graph = defaultdict(list)
         table_holders = {}
         for user_id, state in global_state.items():
@@ -229,8 +275,6 @@ class DeadlockDetector(threading.Thread):
 
         for user_id, state in global_state.items():
             waiting_for_table = state.get("waiting_for")
-            # CORRECTED: Explicitly check for None instead of relying on truthiness,
-            # as waiting_for_table could be 0, which evaluates to False.
             if waiting_for_table is not None and waiting_for_table in table_holders:
                 holder_user_id = table_holders[waiting_for_table]
                 if user_id != holder_user_id:
@@ -238,10 +282,7 @@ class DeadlockDetector(threading.Thread):
         return graph
 
     def detect_cycle(self, graph):
-        """Detects a cycle in the wait-for graph using DFS."""
-        visiting = set()
-        visited = set()
-
+        visiting, visited = set(), set()
         for node in list(graph.keys()):
             if node not in visited:
                 if self._is_cyclic_util(node, graph, visiting, visited):
@@ -249,17 +290,14 @@ class DeadlockDetector(threading.Thread):
         return False
 
     def _is_cyclic_util(self, node, graph, visiting, visited):
-        """Utility function for DFS cycle detection."""
         visiting.add(node)
-
         for neighbor in graph.get(node, []):
             if neighbor in visiting:
-                logging.info(f"Cycle detected: Path includes {neighbor} -> {node}")
+                logger.info(f"  Cycle detected: Path includes {neighbor} -> {node}")
                 return True
             if neighbor not in visited:
                 if self._is_cyclic_util(neighbor, graph, visiting, visited):
                     return True
-
         visiting.remove(node)
         visited.add(node)
         return False
@@ -277,19 +315,16 @@ def main():
 
     detector = DeadlockDetector(users, tables)
 
-    logging.info("Starting simulation...")
+    logger.info("Starting simulation...")
     for user in users:
         user.start()
     detector.start()
 
-    # Wait for the detector thread to finish, which happens after a deadlock
     detector.join()
-
-    # Ensure all user threads have also terminated
     for user in users:
         user.join()
 
-    logging.info("Simulation finished.")
+    logger.info("Simulation finished.")
 
 
 if __name__ == "__main__":
